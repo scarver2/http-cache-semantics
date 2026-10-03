@@ -525,6 +525,126 @@ describe('okhttp tests', function() {
         );
     });
 
+    it('request max stale is honored for an ordinarily expired response', function() {
+        const cache = stalePolicy('max-age=120');
+
+        assert(cache.satisfiesWithoutRevalidation(maxStaleRequest()));
+    });
+
+    it('request max stale preserves the ordinary expiration tolerance', function() {
+        const cache = stalePolicy('max-age=120');
+
+        assert(cache.satisfiesWithoutRevalidation(maxStaleRequest(1000)));
+        assert(!cache.satisfiesWithoutRevalidation(maxStaleRequest(10)));
+    });
+
+    it('request max stale does not expose shared response cookies without an explicit opt-in', function() {
+        const cache = stalePolicy('max-age=120', {
+            responseHeaders: { 'set-cookie': 'session=private' },
+        });
+
+        assert(!cache.satisfiesWithoutRevalidation(maxStaleRequest(1000)));
+    });
+
+    for (const optIn of ['public', 'immutable']) {
+        it(`request max stale preserves the ${optIn} shared-cookie opt-in`, function() {
+            const cache = stalePolicy(`max-age=120, ${optIn}`, {
+                responseHeaders: { 'set-cookie': 'session=public' },
+            });
+
+            assert(cache.satisfiesWithoutRevalidation(maxStaleRequest()));
+        });
+    }
+
+    it('request max stale does not bypass proxy revalidation in a shared cache', function() {
+        const cache = stalePolicy('max-age=120, proxy-revalidate');
+
+        assert(!cache.satisfiesWithoutRevalidation(maxStaleRequest(1000)));
+    });
+
+    it('request max stale does not bypass response no-cache', function() {
+        const cache = stalePolicy('max-age=120, no-cache');
+
+        assert(!cache.satisfiesWithoutRevalidation(maxStaleRequest()));
+    });
+
+    it('request max stale does not bypass response no-cache in a nonshared cache', function() {
+        const cache = stalePolicy('max-age=120, no-cache', { shared: false });
+
+        assert(!cache.satisfiesWithoutRevalidation(maxStaleRequest(1000)));
+    });
+
+    it('request max stale does not reuse a private response in a shared cache', function() {
+        const cache = stalePolicy('max-age=120, private');
+
+        assert(!cache.satisfiesWithoutRevalidation(maxStaleRequest()));
+    });
+
+    for (const cacheControl of [
+        'max-age=120',
+        'max-age=120, private',
+        'max-age=120, proxy-revalidate',
+    ]) {
+        it(`request max stale preserves nonshared behavior for ${cacheControl}`, function() {
+            const cache = stalePolicy(cacheControl, {
+                responseHeaders: { 'set-cookie': 'session=private' },
+                shared: false,
+            });
+
+            assert(cache.satisfiesWithoutRevalidation(maxStaleRequest()));
+        });
+    }
+
+    for (const testCase of [
+        { name: 'shared cookies', headers: { 'set-cookie': 'session=private' }, reuse: false },
+        { name: 'shared proxy-revalidate', directive: 'proxy-revalidate', reuse: false },
+        { name: 'response no-cache', directive: 'no-cache', reuse: false },
+        { name: 'nonshared no-cache', directive: 'no-cache', shared: false, reuse: false },
+        { name: 'ordinary expiration', reuse: true },
+        { name: 'public shared cookies', directive: 'public', headers: { 'set-cookie': 'session=public' }, reuse: true },
+        { name: 'immutable shared cookies', directive: 'immutable', headers: { 'set-cookie': 'session=public' }, reuse: true },
+        { name: 'nonshared cookies and proxy-revalidate', directive: 'proxy-revalidate', headers: { 'set-cookie': 'session=private' }, shared: false, reuse: true },
+    ]) {
+        it(`request max stale preserves ${testCase.name} through serialization`, function() {
+            const original = stalePolicy(
+                `max-age=120${testCase.directive ? ', ' + testCase.directive : ''}`,
+                { responseHeaders: testCase.headers, shared: testCase.shared }
+            );
+            const restored = CachePolicy.fromObject(JSON.parse(JSON.stringify(original.toObject())));
+
+            for (const cache of [original, restored]) {
+                for (const request of [maxStaleRequest(), maxStaleRequest(1000)]) {
+                    assert.strictEqual(cache.satisfiesWithoutRevalidation(request), testCase.reuse);
+
+                    if (!testCase.reuse) {
+                        const result = cache.evaluateRequest(request);
+                        assert.strictEqual(result.response, undefined);
+                        assert.strictEqual(result.revalidation.synchronous, true);
+                    }
+                }
+            }
+        });
+    }
+
+    function maxStaleRequest(seconds) {
+        const value = seconds === undefined ? 'max-stale' : `max-stale=${seconds}`;
+        return { headers: { 'cache-control': value } };
+    }
+
+    function stalePolicy(cacheControl, { responseHeaders = {}, shared = true } = {}) {
+        return new CachePolicy(
+            { headers: {} },
+            {
+                headers: {
+                    age: 240,
+                    'cache-control': cacheControl,
+                    ...responseHeaders,
+                },
+            },
+            { shared }
+        );
+    }
+
     it('get headers deletes cached100 level warnings', function() {
         const cache = new CachePolicy(
             { headers: {} },
